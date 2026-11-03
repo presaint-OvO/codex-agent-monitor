@@ -2092,6 +2092,41 @@ def agents_for_session(
     ]
 
 
+def session_timeline_origin(state: MonitorState, session_id: str) -> float | None:
+    """Return the first real child start for a stable per-session timeline."""
+    agents = agents_for_session(state, session_id)
+    if not agents:
+        return None
+    return min(agent.started_at for agent in agents)
+
+
+def timeline_timestamp_text(
+    agent: AgentState, origin: float | None, current: float
+) -> str:
+    """Format when an Agent ended relative to the session's first child start."""
+    if origin is None:
+        origin = agent.started_at
+    if agent.finished_at is not None:
+        end = agent.finished_at
+    elif agent.status in ACTIVE_AGENT_STATUSES:
+        end = current
+    else:
+        end = agent.last_activity_at
+    elapsed = max(0, int(end - origin))
+    minutes, seconds = divmod(elapsed, 60)
+    return f"{minutes}m {seconds:02d}s"
+
+
+def agent_list_timeline_text(
+    agent: AgentState, origin: float | None, current: float
+) -> str:
+    """Keep the requested step count and timeline timestamp adjacent."""
+    return (
+        f"{len(agent.steps)}步  时间戳 "
+        f"{timeline_timestamp_text(agent, origin, current)}"
+    )
+
+
 def agent_status_label(status: str) -> tuple[str, str]:
     labels = {
         "running": ("● 运行中", "green"),
@@ -2385,6 +2420,9 @@ def draw_agents(view: CursesView, controller: TuiController, state: MonitorState
     controller.agent_offset = keep_visible(index, controller.agent_offset, visible)
     shown = items[controller.agent_offset : controller.agent_offset + visible]
     now = time.time()
+    timeline_origin = session_timeline_origin(
+        state, controller.selected_session_id or UNSCOPED_SESSION
+    )
     y = 2
     previous_kind = ""
     for key, agent in shown:
@@ -2404,13 +2442,20 @@ def draw_agents(view: CursesView, controller: TuiController, state: MonitorState
         line = (
             f" {'▶' if selected else ' '} {status}  {kind}  {agent.name}  "
             f"[{short_id(agent.agent_id)}]  {duration_label(agent)} "
-            f"{duration_text(agent, now)}  {len(agent.steps)}步"
+            f"{duration_text(agent, now)}"
         )
         view.add(y, 0, line, view.attr(status_style, selected=selected), fill=True)
         task = agent.task or "等待任务信息"
         if agent.worker_kind == "external_task":
             task = f"独立 Session {short_id(agent.external_session_id)} · {task}"
-        view.add(y + 1, 0, f"     {task}", view.attr("dim", selected=selected), fill=True)
+        supplement = agent_list_timeline_text(agent, timeline_origin, now)
+        view.add(
+            y + 1,
+            0,
+            f"     {supplement}  ·  {task}",
+            view.attr("dim", selected=selected),
+            fill=True,
+        )
         y += 2
 
 

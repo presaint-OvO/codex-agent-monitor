@@ -11,6 +11,7 @@
 - 主页按 Codex 中的真实标题展示 session、项目和状态，内部 ID 只作补充信息。
 - 进入 session 后查看子 Agent 名称、任务概述和运行状态，再进入详情页查看创建提示词、工具调用、进度及结果。
 - 显示 Agent 从启动到结束的完整耗时；运行中显示当前已运行时长，短步骤精确到毫秒。
+- 在 Agent 列表的“步数”后显示 session 相对时间戳：以本 session 最早子 Agent 的开始时间为 `0m 00s`，完成后冻结在相对完成时刻。
 - 识别主 session 通过 `codex_tui.create_thread` 调度的独立任务，将它们归到创建者下面，避免与主 session 并列重复显示。
 - 支持隐藏单个 Agent、清空某个 session 或全部记录，并可恢复；这些操作不会删除 Codex 原始日志。
 - 优先使用 Codex 用户级 Hooks，并以只读方式扫描 rollout，兼容安装前已经开始的会话。

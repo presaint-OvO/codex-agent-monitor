@@ -1001,6 +1001,132 @@ class TuiControllerTests(unittest.TestCase):
         self.assertEqual(monitor.duration_text(running, 160.0), "1m 00s")
         self.assertEqual(monitor.duration_label(running), "已运行")
 
+    def test_agent_list_timestamp_uses_first_session_child_as_zero(self) -> None:
+        state = monitor.MonitorState()
+        first = monitor.AgentState(
+            agent_id="/root/first",
+            name="first",
+            session_id="session",
+            started_at=100.0,
+            finished_at=125.0,
+            status="completed",
+            last_activity_at=125.0,
+        )
+        second = monitor.AgentState(
+            agent_id="/root/second",
+            name="second",
+            session_id="session",
+            started_at=110.0,
+            finished_at=225.0,
+            status="completed",
+            last_activity_at=225.0,
+        )
+        running = monitor.AgentState(
+            agent_id="/root/running",
+            name="running",
+            session_id="session",
+            started_at=140.0,
+            status="running",
+            last_activity_at=160.0,
+        )
+        unrelated = monitor.AgentState(
+            agent_id="/root/old-other-session",
+            session_id="other-session",
+            started_at=10.0,
+        )
+        state.agents["session::/root/first"] = first
+        state.agents["session::/root/second"] = second
+        state.agents["session::/root/running"] = running
+        state.agents["other-session::/root/old"] = unrelated
+
+        origin = monitor.session_timeline_origin(state, "session")
+
+        self.assertEqual(origin, 100.0)
+        self.assertEqual(monitor.timeline_timestamp_text(first, origin, 300.0), "0m 25s")
+        self.assertEqual(monitor.timeline_timestamp_text(second, origin, 300.0), "2m 05s")
+        self.assertEqual(monitor.timeline_timestamp_text(running, origin, 170.0), "1m 10s")
+        second.steps["one"] = monitor.Step(
+            key="one", tool="Shell", summary="", started_at=120.0
+        )
+        second.steps["two"] = monitor.Step(
+            key="two", tool="Read", summary="", started_at=130.0
+        )
+        self.assertEqual(
+            monitor.agent_list_timeline_text(second, origin, 300.0),
+            "2步  时间戳 2m 05s",
+        )
+
+    def test_session_timeline_origin_ignores_default_root_agent(self) -> None:
+        state = monitor.MonitorState()
+        state.agents["session::default"] = monitor.AgentState(
+            agent_id="default-thread",
+            name="default",
+            agent_type="default",
+            session_id="session",
+            started_at=10.0,
+        )
+        state.agents["session::/root/worker"] = monitor.AgentState(
+            agent_id="/root/worker",
+            name="worker",
+            session_id="session",
+            started_at=100.0,
+        )
+
+        self.assertEqual(monitor.session_timeline_origin(state, "session"), 100.0)
+
+    def test_agent_list_draws_timestamp_immediately_after_step_count(self) -> None:
+        class RecordingView:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def frame(self, *_args: object) -> tuple[int, int]:
+                return 24, 120
+
+            def attr(self, *_args: object, **_kwargs: object) -> int:
+                return 0
+
+            def add(
+                self,
+                _y: int,
+                _x: int,
+                text: str,
+                _attr: int = 0,
+                *,
+                fill: bool = False,
+            ) -> None:
+                del fill
+                self.lines.append(text)
+
+        state = monitor.MonitorState()
+        state.sessions["session"] = monitor.SessionState(
+            session_id="session", cwd="/work/project", started_at=100.0
+        )
+        agent = monitor.AgentState(
+            agent_id="/root/build",
+            name="build",
+            task="Build the feature",
+            session_id="session",
+            started_at=100.0,
+            finished_at=225.0,
+            status="completed",
+            last_activity_at=225.0,
+        )
+        agent.steps["one"] = monitor.Step(
+            key="one", tool="Shell", summary="", started_at=120.0
+        )
+        state.agents["session::/root/build"] = agent
+        controller = monitor.TuiController()
+        controller.selected_session_id = "session"
+        controller.selected_agent_key = "session::/root/build"
+        view = RecordingView()
+
+        monitor.draw_agents(view, controller, state)
+
+        self.assertTrue(
+            any("1步  时间戳 2m 05s" in line for line in view.lines),
+            view.lines,
+        )
+
     def test_hidden_agents_persist_and_new_activity_reappears(self) -> None:
         state = self.populated_state()
         with tempfile.TemporaryDirectory() as directory:
