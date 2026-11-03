@@ -168,7 +168,22 @@ class RolloutScannerTests(unittest.TestCase):
                         "namespace": "collaboration",
                         "name": "interrupt_agent",
                         "call_id": "interrupt-one",
-                        "arguments": json.dumps({"target": "/root/review"}),
+                        # Codex accepts and records a short task name here even
+                        # though SubAgentActivity uses the canonical path.
+                        "arguments": json.dumps({"target": "review"}),
+                    },
+                )
+                + record(
+                    "2026-11-02T10:00:02.500Z",
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "item": {
+                            "type": "SubAgentActivity",
+                            "kind": "interrupted",
+                            "agent_thread_id": "child-one",
+                            "agent_path": "/root/review",
+                        },
                     },
                 )
                 + record(
@@ -223,8 +238,13 @@ class RolloutScannerTests(unittest.TestCase):
             )
 
             self.assertNotIn("root-thread::/root", state.agents)
+            self.assertNotIn("root-thread::review", state.agents)
             self.assertEqual(
                 state.agents["root-thread::/root/review"].status, "interrupted"
+            )
+            self.assertAlmostEqual(
+                state.agents["root-thread::/root/review"].finished_at,
+                monitor.parse_time("2026-11-02T10:00:02.500Z"),
             )
             completed = state.agents["root-thread::/root/test"]
             self.assertEqual(completed.status, "completed")

@@ -2,6 +2,13 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/)。
 
+## [1.1.1] - 2026-11-03
+
+- 修复短任务名中断时产生一条“运行中”幽灵副本的问题。
+- 识别 rollout 中的 `interrupted`、`cancelled` 和 `failed` 子 Agent 生命周期事件。
+- 同一终态被重复上报时保留最早的真实结束时间，避免持续时间被刷新拉长。
+- 短任务名只在同一 session 内唯一匹配已有子 Agent，防止跨 session 或同名误归组。
+
 ## [1.1.0] - 2026-11-03
 
 - 在 Agent 列表中增加 session 相对时间戳。

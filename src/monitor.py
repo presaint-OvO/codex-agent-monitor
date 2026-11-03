@@ -556,8 +556,32 @@ class MonitorState:
             return None
         key = self._scoped(agent_id, event)
         agent = self.agents.get(key)
-        if agent is not None or not create:
+        if agent is not None:
             return agent
+
+        # Collaboration tool calls sometimes address an agent by its short task
+        # name (for example ``review``), while lifecycle events use its canonical
+        # path (``/root/review``). Resolve that alias only when it uniquely names
+        # an existing child in the same root session. An ambiguous short name is
+        # deliberately ignored instead of creating a duplicate phantom agent.
+        normalized_target = agent_id.strip().rstrip("/")
+        if "/" not in normalized_target:
+            session_id = compact(event.get("session_id"), 160)
+            candidates = [
+                candidate
+                for candidate in self.agents.values()
+                if (not session_id or candidate.session_id == session_id)
+                and not candidate.agent_id.startswith("pending:")
+                and candidate.agent_id.strip().rstrip("/").rsplit("/", 1)[-1]
+                == normalized_target
+            ]
+            if len(candidates) == 1:
+                return candidates[0]
+            if candidates:
+                return None
+
+        if not create:
+            return None
         timestamp = event_time(event)
         agent = AgentState(
             agent_id=agent_id,
@@ -610,6 +634,8 @@ class MonitorState:
         agent.last_activity_at = max(agent.last_activity_at, timestamp)
         agent.session_id = compact(event.get("session_id"), 160) or agent.session_id
         agent.cwd = compact(event.get("cwd"), 1000) or agent.cwd
+        previous_status = agent.status
+        previous_finished_at = agent.finished_at
         if status in ACTIVE_AGENT_STATUSES:
             session = self.sessions.get(agent.session_id)
             if (
@@ -626,7 +652,14 @@ class MonitorState:
             agent.finished_at = None
         else:
             agent.status = status
-            agent.finished_at = timestamp
+            # The native SubAgentActivity lifecycle event is normally recorded
+            # just before the corresponding tool result/list refresh. Repeated
+            # reports of the same terminal state must not move the finish time
+            # forward and inflate the displayed duration.
+            if previous_status == status and previous_finished_at is not None:
+                agent.finished_at = min(previous_finished_at, timestamp)
+            else:
+                agent.finished_at = timestamp
             self._finish_running_steps(agent)
         if result:
             agent.result = result
@@ -830,13 +863,15 @@ class MonitorState:
             return
         target = target_from(event.get("tool_input"))
         if target:
-            self._set_agent_status(target, "interrupted", event)
+            # A successful interrupt can only refer to an existing agent. Do
+            # not synthesize a new record if Codex returned an unknown alias.
+            self._set_agent_status(target, "interrupted", event, create=False)
 
     def _followup(self, event: dict[str, Any]) -> None:
         target = target_from(event.get("tool_input"))
         if not target:
             return
-        agent = self.agents.get(self._scoped(target, event))
+        agent = self._agent_for_target(target, event, create=False)
         if not agent:
             return
         if matches_tool(compact(event.get("tool_name"), 160), {"followup_task"}):
@@ -1715,6 +1750,10 @@ class RolloutScanner:
                 self.state.apply({"hook_event_name": "SubagentStart", **event})
             elif kind == "completed":
                 self.state.apply({"hook_event_name": "SubagentStop", **event})
+            elif kind in {"interrupted", "cancelled", "failed"}:
+                self.state._set_agent_status(
+                    item.get("agent_path"), kind, event, create=True
+                )
             return 1
 
         if item_type not in self.STEP_ITEM_TYPES:
