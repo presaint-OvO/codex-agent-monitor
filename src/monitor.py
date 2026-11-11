@@ -181,6 +181,36 @@ def task_from_input(tool_input: Any) -> tuple[str, str]:
     return clean_name, clean_task
 
 
+def task_name_from_prompt(prompt: Any, fallback: str = "subagent") -> str:
+    """Build a readable agent label from its assigned task instructions."""
+    text = multiline_text(prompt, 4000)
+    if not text:
+        return compact(fallback, 80) or "subagent"
+    flat = compact(text, 4000)
+    role = ""
+    lowered = flat.lower()
+    if "评审" in flat or "review" in lowered:
+        role = "评审"
+    elif "生成" in flat or "developer" in lowered:
+        role = "生成"
+    elif "集成" in flat or "integration" in lowered:
+        role = "集成"
+    elif "检查" in flat or "inspect" in lowered or "audit" in lowered:
+        role = "检查"
+
+    identifiers = re.findall(
+        r"(?i)(stage[\s_-]*\d+(?:[\s_-]*(?:r|round)[\s_-]*\d+)?)",
+        flat,
+    )
+    if identifiers:
+        identifier = max(identifiers, key=len)
+        return compact(f"{identifier} {role}".strip(), 80)
+
+    first_sentence = re.split(r"[。！？!?\n]", text, maxsplit=1)[0].strip()
+    first_sentence = re.sub(r"^(?:你是|you are)\s*", "", first_sentence, flags=re.I)
+    return compact(first_sentence or fallback, 80)
+
+
 def agent_id_from(value: Any) -> str | None:
     found = first_nested(value, ("agent_id", "subagent_id"))
     if found:
@@ -1405,6 +1435,7 @@ class RolloutScanner:
         self.state = state
         self.history_seconds = max(0.0, history_hours) * 3600
         self.cursors: OrderedDict[Path, FileCursor] = OrderedDict()
+        self.historical_indexed: set[Path] = set()
         self.calls: dict[str, dict[str, Any]] = {}
         self.last_discovery = 0.0
         self.session_index_path = sessions_root.parent / "session_index.jsonl"
@@ -1445,6 +1476,172 @@ class RolloutScanner:
             "agent_type": compact(meta.get("agent_nickname"), 120),
         }
 
+    @staticmethod
+    def _historical_task_prompt(stream: Any) -> str:
+        """Read only the child rollout prefix needed to find its assigned task."""
+        candidate = ""
+        for _, line in zip(range(64), stream):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict) or record.get("type") != "response_item":
+                continue
+            payload_type = payload.get("type")
+            if payload_type == "agent_message":
+                prompt, _ = delegation_prompt_from_agent_message(
+                    payload.get("content")
+                )
+                if prompt:
+                    candidate = prompt
+                continue
+            if payload_type != "message":
+                continue
+            role = payload.get("role")
+            if role == "assistant" and candidate:
+                break
+            if role != "user":
+                continue
+            content = payload.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                text = multiline_text(item.get("text"))
+                if not text:
+                    continue
+                stripped = text.lstrip()
+                if stripped.startswith(("<", "# AGENTS.md")):
+                    continue
+                if stripped.startswith("You are an agent in a team"):
+                    continue
+                candidate = text
+        return candidate
+
+    @staticmethod
+    def _historical_terminal(path: Path) -> tuple[str, float | None, str]:
+        """Inspect a bounded rollout tail for the final child lifecycle event."""
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as stream:
+                start = max(0, size - 262_144)
+                stream.seek(start)
+                if start:
+                    stream.readline()
+                lines = stream.readlines()
+        except OSError:
+            return "", None, ""
+        terminal: tuple[str, float | None, str] = ("", None, "")
+        for raw_line in lines:
+            try:
+                record = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if record.get("type") != "event_msg":
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            payload_type = payload.get("type")
+            timestamp = parse_time(record.get("timestamp"))
+            if payload_type == "task_complete":
+                terminal = (
+                    "completed",
+                    timestamp,
+                    compact(payload.get("last_agent_message"), 1000),
+                )
+            elif payload_type == "turn_aborted":
+                terminal = ("interrupted", timestamp, "")
+        return terminal
+
+    def _index_historical_identity(self, path: Path) -> None:
+        """Backfill old child identities without parsing their full rollouts."""
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                record = json.loads(stream.readline())
+                meta = record.get("payload")
+                if not isinstance(meta, dict) or not self._is_child_meta(meta):
+                    return
+                thread_id = compact(meta.get("id"), 160)
+                root_session = self._root_session(meta)
+                if not thread_id or not root_session:
+                    return
+                agent_path = compact(meta.get("agent_path"), 160)
+                prompt = self._historical_task_prompt(stream)
+        except (OSError, json.JSONDecodeError):
+            return
+
+        started_at = parse_time(record.get("timestamp") or meta.get("timestamp"))
+        try:
+            file_activity = path.stat().st_mtime
+        except OSError:
+            file_activity = started_at
+        nickname = compact(meta.get("agent_nickname"), 120)
+        name = short_id(agent_path) if agent_path else task_name_from_prompt(
+            prompt, nickname or short_id(thread_id)
+        )
+        event = {
+            "timestamp": started_at,
+            "session_id": root_session,
+            "agent_id": thread_id,
+            "turn_id": thread_id,
+            "cwd": compact(meta.get("cwd"), 1000),
+            "agent_type": nickname,
+            "transcript_path": str(path),
+        }
+        key = self.state._scoped(thread_id, event)
+        agent = self.state.agents.get(key)
+        if agent is None:
+            agent = AgentState(
+                agent_id=thread_id,
+                name=name,
+                task=compact(prompt or name, 700),
+                status="stale",
+                started_at=started_at,
+                session_id=root_session,
+                cwd=compact(meta.get("cwd"), 1000),
+                last_activity_at=file_activity,
+            )
+            self.state.agents[key] = agent
+        else:
+            if name and agent.name.strip().lower() in {"subagent", "default"}:
+                agent.name = name
+            agent.started_at = min(agent.started_at, started_at)
+            agent.last_activity_at = max(agent.last_activity_at, file_activity)
+            agent.cwd = compact(meta.get("cwd"), 1000) or agent.cwd
+            if prompt and not agent.task:
+                agent.task = compact(prompt, 700)
+        if nickname:
+            agent.agent_type = nickname
+        if prompt:
+            self.state._set_delegation_prompt(
+                agent, prompt, "历史子 Agent 任务"
+            )
+        agent.turn_ids.add(thread_id)
+        agent.transcript_paths.add(str(path))
+        self.state.turn_to_agent[self.state._scoped(thread_id, event)] = key
+        self.state.transcript_to_agent[str(path)] = key
+        self.state.touch_session(
+            root_session,
+            timestamp=started_at,
+            cwd=meta.get("cwd"),
+        )
+
+        status, finished_at, result = self._historical_terminal(path)
+        if status and finished_at is not None:
+            value: Any = {status: result} if result else status
+            self.state._set_agent_status(
+                thread_id,
+                value,
+                {**event, "timestamp": finished_at},
+                create=False,
+            )
+        elif agent.status in ACTIVE_AGENT_STATUSES:
+            agent.status = "stale"
+            self.state._finish_running_steps(agent)
+
     def _discover(self, force: bool = False) -> None:
         now = time.time()
         if not force and now - self.last_discovery < 1.0:
@@ -1461,10 +1658,17 @@ class RolloutScanner:
             if path in self.cursors:
                 continue
             try:
-                if self.history_seconds and path.stat().st_mtime < cutoff:
+                is_historical = (
+                    bool(self.history_seconds) and path.stat().st_mtime < cutoff
+                )
+                if is_historical:
+                    if path not in self.historical_indexed:
+                        self._index_historical_identity(path)
+                        self.historical_indexed.add(path)
                     continue
             except OSError:
                 continue
+            self.historical_indexed.discard(path)
             self.cursors[path] = FileCursor()
 
     def _poll_session_titles(self) -> int:
@@ -1592,13 +1796,17 @@ class RolloutScanner:
             agent = self.state._agent_for_target(agent_id, event, create=True)
             if agent is None:
                 continue
-            if nickname:
+            prompt_name = task_name_from_prompt(prompt, "") if prompt else ""
+            if prompt_name:
+                agent.name = prompt_name
+            elif nickname:
                 if agent.name.strip().lower() in {
                     "subagent",
                     "default",
                     short_id(agent_id).lower(),
                 }:
                     agent.name = nickname
+            if nickname:
                 agent.agent_type = nickname
             if prompt:
                 if not agent.task or agent.task.startswith("任务标识:"):
@@ -2382,6 +2590,12 @@ def detail_lines(
         ),
         (f"Agent: {agent.name}    ID: {agent.agent_id}", "bold"),
     ]
+    if (
+        agent.agent_type
+        and agent.agent_type.lower() != "default"
+        and agent.agent_type != agent.name
+    ):
+        lines.append((f"Codex nickname: {agent.agent_type}", "dim"))
     if agent.worker_kind == "external_task":
         lines.extend(
             [
@@ -2893,7 +3107,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--history-hours",
         type=float,
         default=12.0,
-        help="初始扫描多少小时内更新的 Codex sessions",
+        help="完整扫描多少小时内更新的 Codex sessions；更早记录仍建立轻量索引",
     )
     parser.add_argument(
         "--stale-minutes",

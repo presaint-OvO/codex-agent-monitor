@@ -2,6 +2,13 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/)。
 
+## [1.1.3] - 2026-11-11
+
+- 子 Agent 主名称改为从初始任务提炼，Codex 自动分配的 nickname 仅在详情页作为补充信息显示。
+- 为扫描窗口之外的历史子 Agent 建立轻量身份与终态索引，旧 session 不再因 `--history-hours` 被整体隐藏。
+- 历史索引复用 Hooks 中已有的执行步骤，并从 rollout 恢复任务提示词、真实名称与完成/中断状态。
+- 历史回放保持有界：只读取子 Agent 文件前缀和最多 256 KiB 的尾部，不完整解析陈旧 rollout。
+
 ## [1.1.2] - 2026-11-11
 
 - 兼容 Codex CLI 0.167.1 的 multi-agent v1 rollout 格式。

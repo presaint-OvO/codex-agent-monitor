@@ -9,12 +9,12 @@
 ## 功能
 
 - 主页按 Codex 中的真实标题展示 session、项目和状态，内部 ID 只作补充信息。
-- 进入 session 后查看子 Agent 名称、任务概述和运行状态，再进入详情页查看创建提示词、工具调用、进度及结果。
+- 进入 session 后查看从初始任务提炼出的子 Agent 名称、任务概述和运行状态；Codex 自动分配的 nickname 只在详情页作为补充信息显示。
 - 显示 Agent 从启动到结束的完整耗时；运行中显示当前已运行时长，短步骤精确到毫秒。
 - 在 Agent 列表的“步数”后显示 session 相对时间戳：以本 session 最早子 Agent 的开始时间为 `0m 00s`，完成后冻结在相对完成时刻。
 - 识别主 session 通过 `codex_tui.create_thread` 调度的独立任务，将它们归到创建者下面，避免与主 session 并列重复显示。
 - 支持隐藏单个 Agent、清空某个 session 或全部记录，并可恢复；这些操作不会删除 Codex 原始日志。
-- 优先使用 Codex 用户级 Hooks，并以只读方式扫描 rollout，兼容安装前已经开始的会话。
+- 优先使用 Codex 用户级 Hooks，并以只读方式扫描 rollout；近期会话读取完整步骤，更早的历史会话建立轻量身份与终态索引，因此安装前及扫描窗口外的子 Agent 仍可查看。
 - 兼容 Codex CLI multi-agent v1 的线程 ID、nickname 与 `CollabAgentToolCall` 生命周期记录。
 - curses 备用屏幕原地刷新，保持当前选择与滚动位置。
 - 仅使用 Python 标准库，无第三方运行时依赖。
@@ -78,7 +78,7 @@ codex-agents --once             # 输出一次当前状态
 codex-agents --clear            # 清空 Hook 事件缓存
 codex-agents --clear-agents     # 隐藏全部 Agent 后退出
 codex-agents --restore-hidden   # 恢复全部隐藏记录后退出
-codex-agents --history-hours 6  # 只扫描最近 6 小时更新的会话
+codex-agents --history-hours 6  # 最近 6 小时读取完整步骤；更早会话仍显示轻量索引
 codex-agents --stale-minutes 90 # 调整缺少终态时的兜底阈值
 codex-agents --plain            # 使用普通文本刷新模式
 codex-agents --native           # 打开 Codex 内置 Agent 控制中心
@@ -89,7 +89,7 @@ codex-agents --native           # 打开 Codex 内置 Agent 控制中心
 工具会读取：
 
 - `~/.codex/session_index.jsonl`
-- `~/.codex/sessions/` 下近期更新的 rollout
+- `~/.codex/sessions/` 下的 rollout（近期记录完整读取，历史记录只读取身份前缀与终态尾部）
 - `${XDG_STATE_HOME:-~/.local/state}/codex-agent-monitor/events.jsonl`
 
 隐藏规则保存在同一状态目录的 `visibility.json`。这些内容可能包含任务描述、提示词、工具参数、文件路径和结果摘要，请勿把真实日志提交到公开仓库或发送给不受信任的人。

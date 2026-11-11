@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import time
@@ -141,7 +142,7 @@ class RolloutScannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             rollout = root / "rollout-root.jsonl"
-            prompt = "独立检查新版 Codex 的子 Agent 事件。"
+            prompt = "你是全新独立生成 Agent，仅负责 Stage 3 一个正式候选。"
             rollout.write_text(
                 record(
                     "2026-11-11T06:00:00Z",
@@ -181,7 +182,7 @@ class RolloutScannerTests(unittest.TestCase):
             )
 
             agent = state.agents["root-thread::child-thread"]
-            self.assertEqual(agent.name, "Darwin")
+            self.assertEqual(agent.name, "Stage 3 生成")
             self.assertEqual(agent.agent_type, "Darwin")
             self.assertEqual(agent.status, "starting")
             self.assertEqual(agent.delegation_prompt, prompt)
@@ -295,15 +296,99 @@ class RolloutScannerTests(unittest.TestCase):
 
             completed = state.agents["root-thread::child-one"]
             sibling = state.agents["root-thread::child-two"]
-            self.assertEqual(completed.name, "Darwin")
+            self.assertEqual(completed.name, "生成候选")
             self.assertEqual(completed.status, "completed")
             self.assertEqual(completed.result, "候选已生成。")
             self.assertIn("command-one", completed.steps)
             self.assertEqual(
                 completed.steps["progress-one"].summary, "正在核对候选。"
             )
-            self.assertEqual(sibling.name, "Tesla")
+            self.assertEqual(sibling.name, "独立评审")
             self.assertEqual(sibling.status, "starting")
+
+    def test_historical_child_identity_backfills_default_hook_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = root / "rollout-old-child.jsonl"
+            child.write_text(
+                record(
+                    "2026-11-03T06:00:00Z",
+                    "session_meta",
+                    {
+                        "id": "child-thread",
+                        "session_id": "root-thread",
+                        "parent_thread_id": "root-thread",
+                        "thread_source": "subagent",
+                        "agent_path": "/root/v4t4_review_s2_r01",
+                        "agent_nickname": "Herschel",
+                        "cwd": "/work/project",
+                    },
+                )
+                + record(
+                    "2026-11-03T06:00:01Z",
+                    "response_item",
+                    {
+                        "type": "agent_message",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Message Type: NEW_TASK\n"
+                                    "Task name: /root/v4t4_review_s2_r01\n"
+                                    "Sender: /root\n"
+                                    "Payload:\n独立评审 Stage 2 r01。"
+                                ),
+                            }
+                        ],
+                    },
+                )
+                + record(
+                    "2026-11-03T06:05:00Z",
+                    "event_msg",
+                    {
+                        "type": "task_complete",
+                        "last_agent_message": "评审完成。",
+                    },
+                ),
+                encoding="utf-8",
+            )
+            old_time = time.time() - 7200
+            os.utime(child, (old_time, old_time))
+
+            state = monitor.MonitorState()
+            start = {
+                "hook_event_name": "SubagentStart",
+                "timestamp": "2026-11-03T06:00:00Z",
+                "session_id": "root-thread",
+                "agent_id": "child-thread",
+                "agent_type": "default",
+                "cwd": "/work/project",
+            }
+            state.apply(start)
+            state.apply(
+                {
+                    **start,
+                    "hook_event_name": "PreToolUse",
+                    "timestamp": "2026-11-03T06:01:00Z",
+                    "tool_name": "Shell",
+                    "tool_use_id": "historical-step",
+                    "tool_input": "true",
+                }
+            )
+
+            monitor.RolloutScanner(root, state, history_hours=1).poll(
+                force_discovery=True
+            )
+
+            agent = state.agents["root-thread::child-thread"]
+            self.assertEqual(agent.name, "v4t4_review_s2_r01")
+            self.assertEqual(agent.agent_type, "Herschel")
+            self.assertEqual(agent.status, "completed")
+            self.assertEqual(agent.result, "评审完成。")
+            self.assertEqual(agent.delegation_prompt, "独立评审 Stage 2 r01。")
+            self.assertIn("historical-step", agent.steps)
+            self.assertTrue(monitor.is_visible_subagent(agent))
+            self.assertNotIn("root-thread::/root/v4t4_review_s2_r01", state.agents)
 
     def test_list_agents_and_interrupt_results_set_terminal_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
