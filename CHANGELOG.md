@@ -2,6 +2,14 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/)。
 
+## [1.1.2] - 2026-11-11
+
+- 兼容 Codex CLI 0.167.1 的 multi-agent v1 rollout 格式。
+- 从 `CollabAgentToolCall` 恢复子 Agent 的线程身份、nickname、创建提示词和终态。
+- 在 `agent_path` 缺失时使用子线程 ID 关联执行步骤与详情。
+- 修复新格式下子 Agent 完成可能误结束同 session 其他 Agent 的问题。
+- 历史回放不会用较早的活动事件重新打开已结束 Agent。
+
 ## [1.1.1] - 2026-11-03
 
 - 修复短任务名中断时产生一条“运行中”幽灵副本的问题。

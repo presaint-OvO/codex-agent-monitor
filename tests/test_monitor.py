@@ -137,6 +137,174 @@ class RolloutScannerTests(unittest.TestCase):
             self.assertIn("thread limit reached", agent.result)
             self.assertEqual(state.pending_spawns, {})
 
+    def test_multi_agent_v1_spawn_is_visible_without_child_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rollout = root / "rollout-root.jsonl"
+            prompt = "独立检查新版 Codex 的子 Agent 事件。"
+            rollout.write_text(
+                record(
+                    "2026-11-11T06:00:00Z",
+                    "session_meta",
+                    {"id": "root-thread", "cwd": "/work/project"},
+                )
+                + record(
+                    "2026-11-11T06:00:01Z",
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "started_at_ms": 1_794_374_401_000,
+                        "completed_at_ms": 1_794_374_401_010,
+                        "item": {
+                            "type": "CollabAgentToolCall",
+                            "id": "spawn-v1",
+                            "tool": "spawn_agent",
+                            "status": "completed",
+                            "receiver_thread_ids": ["child-thread"],
+                            "receiver_agents": [
+                                {
+                                    "thread_id": "child-thread",
+                                    "agent_nickname": "Darwin",
+                                }
+                            ],
+                            "prompt": prompt,
+                            "agents_states": {"child-thread": "pending_init"},
+                        },
+                    },
+                ),
+                encoding="utf-8",
+            )
+
+            state = monitor.MonitorState()
+            monitor.RolloutScanner(root, state, history_hours=1).poll(
+                force_discovery=True
+            )
+
+            agent = state.agents["root-thread::child-thread"]
+            self.assertEqual(agent.name, "Darwin")
+            self.assertEqual(agent.agent_type, "Darwin")
+            self.assertEqual(agent.status, "starting")
+            self.assertEqual(agent.delegation_prompt, prompt)
+            self.assertTrue(monitor.is_visible_subagent(agent))
+
+    def test_multi_agent_v1_child_completion_does_not_stop_siblings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "rollout-2026-11-11T06-00-00-root.jsonl"
+            child = root / "rollout-2026-11-11T06-00-01-child.jsonl"
+
+            def spawn_item(agent_id: str, nickname: str, prompt: str) -> str:
+                return record(
+                    "2026-11-11T06:00:01Z",
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "item": {
+                            "type": "CollabAgentToolCall",
+                            "id": f"spawn-{agent_id}",
+                            "tool": "spawn_agent",
+                            "status": "completed",
+                            "receiver_thread_ids": [agent_id],
+                            "receiver_agents": [
+                                {
+                                    "thread_id": agent_id,
+                                    "agent_nickname": nickname,
+                                }
+                            ],
+                            "prompt": prompt,
+                            "agents_states": {agent_id: "pending_init"},
+                        },
+                    },
+                )
+
+            parent.write_text(
+                record(
+                    "2026-11-11T06:00:00Z",
+                    "session_meta",
+                    {"id": "root-thread", "cwd": "/work/project"},
+                )
+                + spawn_item("child-one", "Darwin", "生成候选。")
+                + spawn_item("child-two", "Tesla", "独立评审。"),
+                encoding="utf-8",
+            )
+            child.write_text(
+                record(
+                    "2026-11-11T06:00:01Z",
+                    "session_meta",
+                    {
+                        "id": "child-one",
+                        "session_id": "root-thread",
+                        "parent_thread_id": "root-thread",
+                        "thread_source": "subagent",
+                        "agent_path": None,
+                        "agent_nickname": "Darwin",
+                        "cwd": "/work/project",
+                        "source": {
+                            "subagent": {
+                                "thread_spawn": {
+                                    "parent_thread_id": "root-thread",
+                                    "agent_path": None,
+                                    "agent_nickname": "Darwin",
+                                }
+                            }
+                        },
+                    },
+                )
+                + record(
+                    "2026-11-11T06:00:02Z",
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "item": {
+                            "type": "CommandExecution",
+                            "id": "command-one",
+                            "command": ["/bin/bash", "-lc", "true"],
+                            "status": "completed",
+                            "exit_code": 0,
+                        },
+                    },
+                )
+                + record(
+                    "2026-11-11T06:00:02.500Z",
+                    "response_item",
+                    {
+                        "type": "message",
+                        "id": "progress-one",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [
+                            {"type": "output_text", "text": "正在核对候选。"}
+                        ],
+                    },
+                )
+                + record(
+                    "2026-11-11T06:00:03Z",
+                    "event_msg",
+                    {
+                        "type": "task_complete",
+                        "last_agent_message": "候选已生成。",
+                    },
+                ),
+                encoding="utf-8",
+            )
+
+            state = monitor.MonitorState()
+            monitor.RolloutScanner(root, state, history_hours=1).poll(
+                force_discovery=True
+            )
+
+            completed = state.agents["root-thread::child-one"]
+            sibling = state.agents["root-thread::child-two"]
+            self.assertEqual(completed.name, "Darwin")
+            self.assertEqual(completed.status, "completed")
+            self.assertEqual(completed.result, "候选已生成。")
+            self.assertIn("command-one", completed.steps)
+            self.assertEqual(
+                completed.steps["progress-one"].summary, "正在核对候选。"
+            )
+            self.assertEqual(sibling.name, "Tesla")
+            self.assertEqual(sibling.status, "starting")
+
     def test_list_agents_and_interrupt_results_set_terminal_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

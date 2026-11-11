@@ -637,6 +637,12 @@ class MonitorState:
         previous_status = agent.status
         previous_finished_at = agent.finished_at
         if status in ACTIVE_AGENT_STATUSES:
+            if (
+                previous_status in TERMINAL_AGENT_STATUSES
+                and previous_finished_at is not None
+                and timestamp <= previous_finished_at
+            ):
+                return True
             session = self.sessions.get(agent.session_id)
             if (
                 session is not None
@@ -749,11 +755,22 @@ class MonitorState:
             self.agents[agent_key] = agent
 
         timestamp = event_time(event)
+        has_later_terminal_state = (
+            agent.status in TERMINAL_AGENT_STATUSES
+            and agent.finished_at is not None
+            and timestamp <= agent.finished_at
+        )
         agent.started_at = min(agent.started_at, timestamp)
         agent.last_activity_at = max(agent.last_activity_at, timestamp)
-        agent.agent_type = compact(event.get("agent_type"), 120)
-        if agent.name == "subagent" and agent.agent_type:
-            agent.name = agent.agent_type
+        agent_type = compact(event.get("agent_type"), 120)
+        if agent_type and (agent_type.lower() != "default" or not agent.agent_type):
+            agent.agent_type = agent_type
+        if (
+            agent_type
+            and agent_type.lower() != "default"
+            and agent.name.strip().lower() in {"subagent", "default"}
+        ):
+            agent.name = agent_type
         agent.session_id = compact(event.get("session_id"), 160) or agent.session_id
         agent.cwd = compact(event.get("cwd"), 1000) or agent.cwd
 
@@ -768,6 +785,10 @@ class MonitorState:
                 agent.status = "interrupted"
                 agent.finished_at = session.last_turn_finished_at
                 self._finish_running_steps(agent)
+        elif has_later_terminal_state:
+            # Hooks are loaded before historical rollouts. Do not let an older
+            # start/activity record reopen a child that a later hook completed.
+            pass
         else:
             agent.status = "running"
             agent.finished_at = None
@@ -800,7 +821,15 @@ class MonitorState:
         if result:
             agent.result = result
         agent.last_activity_at = max(agent.last_activity_at, event_time(event))
-        agent.agent_type = compact(event.get("agent_type"), 120) or agent.agent_type
+        agent_type = compact(event.get("agent_type"), 120)
+        if agent_type and (agent_type.lower() != "default" or not agent.agent_type):
+            agent.agent_type = agent_type
+        if (
+            agent_type
+            and agent_type.lower() != "default"
+            and agent.name.strip().lower() in {"subagent", "default"}
+        ):
+            agent.name = agent_type
         agent.session_id = compact(event.get("session_id"), 160) or agent.session_id
         agent.cwd = compact(event.get("cwd"), 1000) or agent.cwd
         transcript = compact(event.get("agent_transcript_path"), 1000)
@@ -1406,7 +1435,10 @@ class RolloutScanner:
         return {
             "timestamp": timestamp,
             "session_id": RolloutScanner._root_session(meta),
-            "agent_id": compact(meta.get("agent_path"), 160),
+            # Codex CLI multi-agent v1 (0.167+) no longer emits agent_path in
+            # child session metadata. The child thread ID is stable across the
+            # parent coordination item, hooks, and the child rollout.
+            "agent_id": compact(meta.get("agent_path") or meta.get("id"), 160),
             "turn_id": compact(meta.get("id"), 160),
             "cwd": compact(meta.get("cwd"), 1000),
             "transcript_path": str(path),
@@ -1484,13 +1516,118 @@ class RolloutScanner:
     def _ensure_child(
         self, meta: dict[str, Any], path: Path, timestamp: Any
     ) -> dict[str, Any] | None:
-        if not self._is_child_meta(meta) or not meta.get("agent_path"):
+        if not self._is_child_meta(meta) or not (meta.get("agent_path") or meta.get("id")):
             return None
         event = self._child_event(meta, path, timestamp)
-        agent = self.state._agent_for_event(event)
-        if agent is None or agent.status == "stale":
-            self.state.apply({"hook_event_name": "SubagentStart", **event})
+        # Apply every activity timestamp. MonitorState preserves a later
+        # terminal state during historical replay, while genuinely newer child
+        # activity reopens a resumed multi-turn agent.
+        self.state.apply({"hook_event_name": "SubagentStart", **event})
         return event
+
+    @staticmethod
+    def _collab_receivers(item: dict[str, Any]) -> list[tuple[str, str]]:
+        """Return stable thread IDs and nicknames from a multi-agent v1 item."""
+        names: dict[str, str] = {}
+        ordered_ids: list[str] = []
+        receivers = item.get("receiver_agents")
+        if isinstance(receivers, list):
+            for receiver in receivers:
+                if not isinstance(receiver, dict):
+                    continue
+                thread_id = compact(receiver.get("thread_id"), 160)
+                if not thread_id:
+                    continue
+                if thread_id not in ordered_ids:
+                    ordered_ids.append(thread_id)
+                nickname = compact(receiver.get("agent_nickname"), 120)
+                if nickname:
+                    names[thread_id] = nickname
+        receiver_ids = item.get("receiver_thread_ids")
+        if isinstance(receiver_ids, list):
+            for value in receiver_ids:
+                thread_id = compact(value, 160)
+                if thread_id and thread_id not in ordered_ids:
+                    ordered_ids.append(thread_id)
+        states = item.get("agents_states")
+        if isinstance(states, dict):
+            for value in states:
+                thread_id = compact(value, 160)
+                if thread_id and thread_id not in ordered_ids:
+                    ordered_ids.append(thread_id)
+        return [(thread_id, names.get(thread_id, "")) for thread_id in ordered_ids]
+
+    def _handle_collab_agent_item(
+        self,
+        item: dict[str, Any],
+        payload: dict[str, Any],
+        timestamp: Any,
+        meta: dict[str, Any],
+    ) -> int:
+        """Translate Codex CLI multi-agent v1 coordination lifecycle items."""
+        receivers = self._collab_receivers(item)
+        if not receivers:
+            return 0
+        root_session = self._root_session(meta)
+        tool = compact(item.get("tool"), 120)
+        states = item.get("agents_states")
+        states = states if isinstance(states, dict) else {}
+        started_at = parse_millisecond_time(
+            payload.get("started_at_ms") or item.get("started_at_ms"), timestamp
+        )
+        completed_at = parse_millisecond_time(
+            payload.get("completed_at_ms") or item.get("completed_at_ms"), timestamp
+        )
+        prompt = multiline_text(item.get("prompt"))
+        changed = 0
+        for agent_id, nickname in receivers:
+            event = {
+                "timestamp": started_at,
+                "session_id": root_session,
+                "agent_id": agent_id,
+                "turn_id": agent_id,
+                "cwd": compact(meta.get("cwd"), 1000),
+                "agent_type": nickname,
+            }
+            agent = self.state._agent_for_target(agent_id, event, create=True)
+            if agent is None:
+                continue
+            if nickname:
+                if agent.name.strip().lower() in {
+                    "subagent",
+                    "default",
+                    short_id(agent_id).lower(),
+                }:
+                    agent.name = nickname
+                agent.agent_type = nickname
+            if prompt:
+                if not agent.task or agent.task.startswith("任务标识:"):
+                    agent.task = compact(prompt, 700)
+                self.state._set_delegation_prompt(
+                    agent, prompt, "Codex multi-agent v1 spawn"
+                )
+
+            if tool == "spawn_agent":
+                self.state._set_agent_status(agent_id, "starting", event, create=False)
+            elif tool in {"resume_agent", "send_input", "send_message"}:
+                self.state._set_agent_status(agent_id, "running", event, create=False)
+
+            reported_state = states.get(agent_id)
+            status, _ = self.state._decode_agent_status(reported_state)
+            should_apply_reported = status in TERMINAL_AGENT_STATUSES and tool in {
+                "close_agent",
+                "interrupt_agent",
+                "wait",
+            }
+            if should_apply_reported:
+                self.state._set_agent_status(
+                    agent_id,
+                    reported_state,
+                    {**event, "timestamp": completed_at},
+                    create=False,
+                )
+            changed += 1
+        return changed
 
     def _ensure_external_task(
         self, meta: dict[str, Any], path: Path, timestamp: Any
@@ -1640,7 +1777,7 @@ class RolloutScanner:
                 )
                 return 1
 
-        if self._is_child_meta(meta) and meta.get("agent_path"):
+        if self._is_child_meta(meta):
             worker = self._ensure_child(meta, path, timestamp)
         else:
             worker = self._ensure_external_task(meta, path, timestamp)
@@ -1709,6 +1846,9 @@ class RolloutScanner:
         item_type = item.get("type")
         meta = cursor.meta
         root_session = self._root_session(meta)
+
+        if item_type == "CollabAgentToolCall":
+            return self._handle_collab_agent_item(item, payload, timestamp, meta)
 
         if (
             item_type == "McpToolCall"
@@ -1841,14 +1981,18 @@ class RolloutScanner:
         if record_type == "event_msg":
             changed = self._handle_event_item(payload, timestamp, path, cursor)
             if payload.get("type") == "task_complete":
-                if self._is_child_meta(cursor.meta) and cursor.meta.get("agent_path"):
+                if self._is_child_meta(cursor.meta):
                     child = self._child_event(cursor.meta, path, timestamp)
                     agent = self.state._agent_for_event(child)
                     self.state.apply(
                         {
                             **child,
                             "hook_event_name": "SubagentStop",
-                            "last_assistant_message": agent.result if agent else "",
+                            "last_assistant_message": (
+                                payload.get("last_agent_message")
+                                or (agent.result if agent else "")
+                            ),
+                            "agent_transcript_path": str(path),
                         }
                     )
                     changed += 1
@@ -1860,6 +2004,14 @@ class RolloutScanner:
                     changed += self.state.finish_session_turn(
                         self._root_session(cursor.meta), timestamp
                     )
+            elif payload.get("type") == "turn_aborted" and self._is_child_meta(
+                cursor.meta
+            ):
+                child = self._child_event(cursor.meta, path, timestamp)
+                self.state._set_agent_status(
+                    child.get("agent_id"), "interrupted", child, create=True
+                )
+                changed += 1
             return changed
         return 0
 

@@ -15,6 +15,7 @@
 - 识别主 session 通过 `codex_tui.create_thread` 调度的独立任务，将它们归到创建者下面，避免与主 session 并列重复显示。
 - 支持隐藏单个 Agent、清空某个 session 或全部记录，并可恢复；这些操作不会删除 Codex 原始日志。
 - 优先使用 Codex 用户级 Hooks，并以只读方式扫描 rollout，兼容安装前已经开始的会话。
+- 兼容 Codex CLI multi-agent v1 的线程 ID、nickname 与 `CollabAgentToolCall` 生命周期记录。
 - curses 备用屏幕原地刷新，保持当前选择与滚动位置。
 - 仅使用 Python 标准库，无第三方运行时依赖。
 
@@ -51,7 +52,7 @@ export PATH="$HOME/.local/bin:$PATH"
 - Codex CLI（需产生本地 session rollout；Hooks 可获得更完整、及时的数据）
 - 支持 curses 的终端
 
-目前已在 Codex CLI 0.154.0、Python 3.10 和 WSL2 上验证。Codex 的内部 rollout 格式并非稳定公共 API，未来版本若改变格式，工具可能需要同步适配。
+目前已在 Codex CLI 0.154.0、0.167.1、Python 3.10 和 WSL2 上验证。Codex 的内部 rollout 格式并非稳定公共 API，未来版本若改变格式，工具可能需要同步适配。
 
 ## 交互操作
 
