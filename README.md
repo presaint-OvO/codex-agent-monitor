@@ -1,7 +1,7 @@
 # Codex Agent Monitor
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL-4EAA25.svg)](#运行要求)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20WSL-4EAA25.svg)](#运行要求)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 一个面向 Codex CLI 的用户级交互式终端监控器。它在独立终端中集中展示 session、子 Agent、任务提示词、执行步骤、状态和耗时，不需要修改被监控的项目。
@@ -17,9 +17,11 @@
 - 优先使用 Codex 用户级 Hooks，并以只读方式扫描 rollout；近期会话读取完整步骤，更早的历史会话建立轻量身份与终态索引，因此安装前及扫描窗口外的子 Agent 仍可查看。
 - 兼容 Codex CLI multi-agent v1 的线程 ID、nickname 与 `CollabAgentToolCall` 生命周期记录。
 - curses 备用屏幕原地刷新，保持当前选择与滚动位置。
-- 仅使用 Python 标准库，无第三方运行时依赖。
+- Linux/WSL 仅使用 Python 标准库；Windows 原生仅额外使用 `windows-curses` 提供终端界面。
 
 ## 快速安装
+
+### Linux / WSL
 
 ```bash
 git clone https://github.com/presaint-OvO/codex-agent-monitor.git
@@ -45,14 +47,44 @@ codex-agents
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+### Windows 原生
+
+在 PowerShell 中运行；这会创建工具自己的虚拟环境、安装
+[`windows-curses`](https://pypi.org/project/windows-curses/)、安全合并用户级 Hooks，
+并把命令目录加入当前用户的 `PATH`：
+
+```powershell
+git clone https://github.com/presaint-OvO/codex-agent-monitor.git
+Set-Location .\codex-agent-monitor
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+如果安装器找不到 Python，可显式传入 Python 3.10 或更高版本：
+
+```powershell
+.\install.ps1 -Python "C:\Path\To\python.exe"
+```
+
+重新打开 PowerShell 或 Windows Terminal，再运行：
+
+```powershell
+codex-agents
+```
+
+Windows 安装位置为 `%LOCALAPPDATA%\Programs\codex-agent-monitor`，状态保存在
+`%LOCALAPPDATA%\codex-agent-monitor`，Codex 数据默认读取 `%USERPROFILE%\.codex`。
+Windows 原生和 WSL 是两套独立的 Codex 用户目录：请在要监控的 Codex 所在系统中安装并运行本工具。
+
 ## 运行要求
 
-- Linux 或 WSL2
+- Windows 10/11、Linux 或 WSL2
 - Python 3.10 或更高版本
 - Codex CLI（需产生本地 session rollout；Hooks 可获得更完整、及时的数据）
-- 支持 curses 的终端
+- 支持 curses 的终端；Windows 安装器会在隔离虚拟环境中安装 `windows-curses`
 
-目前已在 Codex CLI 0.154.0、0.167.1、Python 3.10 和 WSL2 上验证。Codex 的内部 rollout 格式并非稳定公共 API，未来版本若改变格式，工具可能需要同步适配。
+目前已在 Codex CLI 0.154.0、0.167.1、0.171.0，Python 3.10/3.12，WSL2 及
+Windows 11 + Windows PowerShell 5.1 上验证。Codex 的内部 rollout 格式并非稳定公共 API，
+未来版本若改变格式，工具可能需要同步适配。
 
 ## 交互操作
 
@@ -88,9 +120,11 @@ codex-agents --native           # 打开 Codex 内置 Agent 控制中心
 
 工具会读取：
 
-- `~/.codex/session_index.jsonl`
-- `~/.codex/sessions/` 下的 rollout（近期记录完整读取，历史记录只读取身份前缀与终态尾部）
-- `${XDG_STATE_HOME:-~/.local/state}/codex-agent-monitor/events.jsonl`
+- Codex 用户目录中的 `session_index.jsonl` 和 `sessions/`；Linux/WSL 默认为
+  `~/.codex`，Windows 默认为 `%USERPROFILE%\.codex`
+- `sessions/` 下的 rollout（近期记录完整读取，历史记录只读取身份前缀与终态尾部）
+- Linux/WSL 的 `${XDG_STATE_HOME:-~/.local/state}/codex-agent-monitor/events.jsonl`，
+  或 Windows 的 `%LOCALAPPDATA%\codex-agent-monitor\events.jsonl`
 
 隐藏规则保存在同一状态目录的 `visibility.json`。这些内容可能包含任务描述、提示词、工具参数、文件路径和结果摘要，请勿把真实日志提交到公开仓库或发送给不受信任的人。
 
@@ -105,6 +139,13 @@ git pull
 ./install.sh
 ```
 
+Windows 更新使用：
+
+```powershell
+git pull
+.\install.ps1
+```
+
 卸载程序并移除它自己的 Hook（会保留其他 Hook 和监控状态）：
 
 ```bash
@@ -117,10 +158,23 @@ git pull
 ./uninstall.sh --purge
 ```
 
+Windows 卸载使用：
+
+```powershell
+.\uninstall.ps1          # 保留监控状态
+.\uninstall.ps1 -Purge   # 同时移除监控状态
+```
+
 ## 开发
 
 ```bash
 make test
+```
+
+Windows 原生测试可直接使用 Python 运行：
+
+```powershell
+python -B -m unittest discover -s tests -p "test_*.py"
 ```
 
 主要目录：

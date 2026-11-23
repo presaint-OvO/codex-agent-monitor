@@ -8,7 +8,7 @@ import json
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 HERE = Path(__file__).resolve().parent
@@ -83,9 +83,44 @@ class ConfigureHooksTests(unittest.TestCase):
         replaced = configure_hooks.install(config, new_path)
 
         self.assertEqual(replaced, 4)
-        serialized = json.dumps(config)
-        self.assertNotIn(str(old_path), serialized)
-        self.assertIn(str(new_path), serialized)
+        commands = [
+            hook["command"]
+            for groups in config["hooks"].values()
+            for group in groups
+            for hook in group["hooks"]
+        ]
+        self.assertFalse(any(str(old_path) in command for command in commands))
+        self.assertTrue(any(str(new_path) in command for command in commands))
+
+    def test_windows_hook_command_quotes_python_and_hook_paths(self) -> None:
+        python_path = r"C:\Program Files\Python312\python.exe"
+        hook_path = PureWindowsPath(
+            r"C:\Users\Example User\AppData\Local\codex-agent-monitor\hook.py"
+        )
+
+        command = configure_hooks.hook_command(
+            hook_path,
+            python_path,
+            platform="nt",
+        )
+
+        self.assertEqual(
+            command,
+            '"C:\\Program Files\\Python312\\python.exe" '
+            '"C:\\Users\\Example User\\AppData\\Local\\codex-agent-monitor\\hook.py"',
+        )
+
+    def test_posix_hook_command_preserves_spaces(self) -> None:
+        command = configure_hooks.hook_command(
+            PurePosixPath("/tmp/example user/hook.py"),
+            "/opt/python tools/python3",
+            platform="posix",
+        )
+
+        self.assertEqual(
+            command,
+            "'/opt/python tools/python3' '/tmp/example user/hook.py'",
+        )
 
     def test_invalid_json_is_not_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

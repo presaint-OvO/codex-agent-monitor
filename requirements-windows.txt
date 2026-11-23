@@ -1,0 +1,2 @@
+# Native Windows CPython does not ship the curses module used by the TUI.
+windows-curses==2.4.2

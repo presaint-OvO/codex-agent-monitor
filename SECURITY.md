@@ -7,5 +7,6 @@
 ## 数据边界
 
 Codex Agent Monitor 是本地只读监控工具，但其界面和事件缓存可能包含任务提示词、命令、文件路径及结果摘要。请把 `${XDG_STATE_HOME:-~/.local/state}/codex-agent-monitor` 视作敏感数据，不要公开分享。
+Windows 原生安装的对应状态目录是 `%LOCALAPPDATA%\codex-agent-monitor`，应按同样方式保护。
 
 安装器只管理带有 `codex-agent-monitor/hook.py` 标记的 Hook；卸载时应保留所有无关配置。

@@ -7,6 +7,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "错误：需要 Python 3.10 或更高版本。" >&2
   exit 1
 fi
+python_bin=$(command -v python3)
 if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'; then
   echo "错误：需要 Python 3.10 或更高版本。" >&2
   exit 1
@@ -49,9 +50,10 @@ chmod 0755 "$wrapper_tmp"
 mv -f -- "$wrapper_tmp" "$wrapper"
 wrapper_tmp=
 
-python3 "$install_dir/configure_hooks.py" install \
+"$python_bin" "$install_dir/configure_hooks.py" install \
   --config "$hook_config" \
-  --hook "$install_dir/hook.py"
+  --hook "$install_dir/hook.py" \
+  --python "$python_bin"
 
 echo
 echo "Codex Agent Monitor 已安装。"

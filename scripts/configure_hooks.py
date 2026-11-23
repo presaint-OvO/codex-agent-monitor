@@ -7,6 +7,8 @@ import argparse
 import json
 import os
 import shlex
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -64,8 +66,33 @@ def strip_monitor_entries(config: dict[str, Any], hook_path: Path | None = None)
     return removed
 
 
-def monitor_group(event: str, hook_path: Path) -> dict[str, Any]:
-    command = f"python3 {shlex.quote(str(hook_path))}"
+def hook_command(
+    hook_path: Path,
+    python_executable: str | Path | None = None,
+    *,
+    platform: str | None = None,
+) -> str:
+    target_platform = os.name if platform is None else platform
+    executable = str(
+        python_executable
+        or (sys.executable if target_platform == "nt" else "python3")
+    )
+    arguments = [executable, str(hook_path)]
+    if target_platform == "nt":
+        return subprocess.list2cmdline(arguments)
+    return shlex.join(arguments)
+
+
+def monitor_group(
+    event: str,
+    hook_path: Path,
+    python_executable: str | Path | None = None,
+    *,
+    platform: str | None = None,
+) -> dict[str, Any]:
+    command = hook_command(
+        hook_path, python_executable, platform=platform
+    )
     group: dict[str, Any] = {
         "hooks": [{"type": "command", "command": command, "timeout": 3}]
     }
@@ -106,7 +133,13 @@ def write_config(path: Path, config: dict[str, Any]) -> None:
             temporary.unlink()
 
 
-def install(config: dict[str, Any], hook_path: Path) -> int:
+def install(
+    config: dict[str, Any],
+    hook_path: Path,
+    python_executable: str | Path | None = None,
+    *,
+    platform: str | None = None,
+) -> int:
     removed = strip_monitor_entries(config, hook_path)
     hooks_by_event = config.setdefault("hooks", {})
     if not isinstance(hooks_by_event, dict):
@@ -115,7 +148,14 @@ def install(config: dict[str, Any], hook_path: Path) -> int:
         groups = hooks_by_event.setdefault(event, [])
         if not isinstance(groups, list):
             raise SystemExit(f"拒绝修改配置：hooks.{event} 必须是数组")
-        groups.append(monitor_group(event, hook_path))
+        groups.append(
+            monitor_group(
+                event,
+                hook_path,
+                python_executable,
+                platform=platform,
+            )
+        )
     return removed
 
 
@@ -124,6 +164,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("action", choices=("install", "remove"))
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--hook", type=Path)
+    parser.add_argument(
+        "--python",
+        dest="python_executable",
+        help="运行 Hook 的 Python 可执行文件；Windows 安装器会传入虚拟环境路径",
+    )
     args = parser.parse_args()
     if args.action == "install" and args.hook is None:
         parser.error("install 需要 --hook")
@@ -131,13 +176,22 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    if os.name == "nt":
+        for stream in (sys.stdout, sys.stderr):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if reconfigure is not None:
+                reconfigure(encoding="utf-8", errors="replace")
     args = parse_args()
     config_path = args.config.expanduser().resolve()
     hook_path = args.hook.expanduser().resolve() if args.hook else None
     config = load_config(config_path)
     if args.action == "install":
         assert hook_path is not None
-        replaced = install(config, hook_path)
+        replaced = install(
+            config,
+            hook_path,
+            python_executable=args.python_executable,
+        )
         write_config(config_path, config)
         print(f"已配置 Codex Hooks：{config_path}（替换旧条目 {replaced} 个）")
     else:

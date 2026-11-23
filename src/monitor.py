@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import curses
 import json
 import locale
 import os
@@ -21,6 +20,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    import curses
+except ModuleNotFoundError:
+    curses = None  # type: ignore[assignment]
+
 
 AGENT_TOOL_NAMES = {"Agent", "spawn_agent", "create_subagent"}
 FOLLOWUP_TOOL_NAMES = {"followup_task", "send_subagent_input", "send_message"}
@@ -29,6 +33,28 @@ INTERRUPT_AGENT_TOOL_NAMES = {"interrupt_agent"}
 ACTIVE_AGENT_STATUSES = {"running", "starting"}
 TERMINAL_AGENT_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
 MAX_DELEGATION_PROMPT_CHARS = 50_000
+
+
+def default_state_home() -> Path:
+    configured = os.environ.get("XDG_STATE_HOME")
+    if configured:
+        return Path(configured)
+    if os.name == "nt":
+        return Path(
+            os.environ.get("LOCALAPPDATA")
+            or Path.home() / "AppData" / "Local"
+        )
+    return Path.home() / ".local" / "state"
+
+
+def configure_windows_stdio() -> None:
+    """Keep redirected Windows output readable without requiring PYTHONUTF8."""
+    if os.name != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
 
 
 class Color:
@@ -2989,7 +3015,10 @@ def run_tui(
             elif key in ("r", "R"):
                 force_discovery = True
             elif key == curses.KEY_RESIZE:
-                pass
+                try:
+                    curses.resize_term(0, 0)
+                except curses.error:
+                    pass
 
         hook_lines = hook_tail.poll()
         if hook_lines:
@@ -3057,15 +3086,12 @@ def demo_events() -> list[dict[str, Any]]:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="在终端中实时监控当前 WSL 用户的 Codex 子 Agent。"
-    )
-    default_state_home = Path(
-        os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+        description="在终端中实时监控当前用户的 Codex 子 Agent。"
     )
     parser.add_argument(
         "--state-dir",
         type=Path,
-        default=default_state_home / "codex-agent-monitor",
+        default=default_state_home() / "codex-agent-monitor",
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -3127,6 +3153,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_windows_stdio()
     args = parse_args(argv)
     state_dir = args.state_dir.expanduser().resolve()
     log_path = state_dir / "events.jsonl"
@@ -3193,6 +3220,13 @@ def main(argv: list[str] | None = None) -> int:
     hook_tail = JsonlTail(log_path)
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.plain
     if interactive:
+        if curses is None:
+            print(
+                "当前 Python 缺少 curses 终端支持。Windows 请重新运行 install.ps1，"
+                "或安装 windows-curses；也可暂时使用 --plain。",
+                file=sys.stderr,
+            )
+            return 2
         try:
             return curses.wrapper(
                 run_tui, state, scanner, hook_tail, args, visibility

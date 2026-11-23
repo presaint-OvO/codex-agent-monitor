@@ -2,6 +2,16 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/)。
 
+## [1.2.0] - 2026-11-23
+
+- 新增 Windows 原生 `install.ps1` / `uninstall.ps1`，使用隔离虚拟环境安装交互式终端依赖并提供全局 `codex-agents` 命令。
+- Hooks 增加 Windows `msvcrt` 文件锁，多个并行 Agent 同时写事件时仍保持 JSONL 完整。
+- Hook 配置按平台生成命令行，正确处理 Windows Python 和脚本路径中的空格。
+- Windows 默认使用 `%LOCALAPPDATA%` 保存监控状态，并继续从 `%USERPROFILE%\.codex` 读取原生 Codex session。
+- `curses` 改为可选导入：未安装终端依赖时 `--once`、`--plain` 等非交互入口仍可使用，并提供明确修复提示。
+- Windows 重定向输出固定为 UTF-8，安装及测试不依赖 `PYTHONUTF8` 或 `PYTHONIOENCODING` 环境变量。
+- 增加 Windows Hook 命令、事件写入和并行写入回归测试。
+
 ## [1.1.3] - 2026-11-11
 
 - 子 Agent 主名称改为从初始任务提炼，Codex 自动分配的 nickname 仅在详情页作为补充信息显示。

@@ -4,18 +4,68 @@
 from __future__ import annotations
 
 import datetime as dt
-import fcntl
 import json
 import os
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
-STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+def default_state_home() -> Path:
+    configured = os.environ.get("XDG_STATE_HOME")
+    if configured:
+        return Path(configured)
+    if os.name == "nt":
+        return Path(
+            os.environ.get("LOCALAPPDATA")
+            or Path.home() / "AppData" / "Local"
+        )
+    return Path.home() / ".local" / "state"
+
+
+STATE_HOME = default_state_home()
 STATE_DIR = STATE_HOME / "codex-agent-monitor"
 EVENT_LOG = STATE_DIR / "events.jsonl"
+EVENT_LOCK = STATE_DIR / "events.lock"
+
+
+@contextmanager
+def event_log_lock() -> Iterator[None]:
+    """Serialize hook writers on both POSIX and native Windows."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with EVENT_LOCK.open("a+b") as stream:
+        if os.name == "nt":
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"\0")
+                stream.flush()
+            stream.seek(0)
+            deadline = time.monotonic() + 2.0
+            while True:
+                try:
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
+        else:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def record_event(event: dict[str, Any]) -> None:
@@ -25,11 +75,10 @@ def record_event(event: dict[str, Any]) -> None:
     event["_monitor_pid"] = os.getpid()
     line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
-    with EVENT_LOG.open("a", encoding="utf-8") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-        stream.write(line)
-        stream.flush()
-        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    with event_log_lock():
+        with EVENT_LOG.open("a", encoding="utf-8", newline="") as stream:
+            stream.write(line)
+            stream.flush()
 
 
 def main() -> int:
