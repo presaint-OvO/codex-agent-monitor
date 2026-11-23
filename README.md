@@ -16,8 +16,8 @@
 - 支持隐藏单个 Agent、清空某个 session 或全部记录，并可恢复；这些操作不会删除 Codex 原始日志。
 - 优先使用 Codex 用户级 Hooks，并以只读方式扫描 rollout；近期会话读取完整步骤，更早的历史会话建立轻量身份与终态索引，因此安装前及扫描窗口外的子 Agent 仍可查看。
 - 兼容 Codex CLI multi-agent v1 的线程 ID、nickname 与 `CollabAgentToolCall` 生命周期记录。
-- curses 备用屏幕原地刷新，保持当前选择与滚动位置。
-- Linux/WSL 仅使用 Python 标准库；Windows 原生仅额外使用 `windows-curses` 提供终端界面。
+- 备用屏幕原地刷新，保持当前选择与滚动位置；Windows 使用原生 VT 按行重绘，避免中文字符残留。
+- 仅使用 Python 标准库，无第三方运行时依赖。
 
 ## 快速安装
 
@@ -49,8 +49,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ### Windows 原生
 
-在 PowerShell 中运行；这会创建工具自己的虚拟环境、安装
-[`windows-curses`](https://pypi.org/project/windows-curses/)、安全合并用户级 Hooks，
+在 PowerShell 中运行；这会创建工具自己的虚拟环境、安全合并用户级 Hooks，
 并把命令目录加入当前用户的 `PATH`：
 
 ```powershell
@@ -80,7 +79,7 @@ Windows 原生和 WSL 是两套独立的 Codex 用户目录：请在要监控的
 - Windows 10/11、Linux 或 WSL2
 - Python 3.10 或更高版本
 - Codex CLI（需产生本地 session rollout；Hooks 可获得更完整、及时的数据）
-- 支持 curses 的终端；Windows 安装器会在隔离虚拟环境中安装 `windows-curses`
+- Linux/WSL 需要 curses；Windows 使用系统原生 VT 终端和 Python 标准库，无需安装 `windows-curses`
 
 目前已在 Codex CLI 0.154.0、0.167.1、0.171.0，Python 3.10/3.12，WSL2 及
 Windows 11 + Windows PowerShell 5.1 上验证。Codex 的内部 rollout 格式并非稳定公共 API，
@@ -175,6 +174,12 @@ Windows 原生测试可直接使用 Python 运行：
 
 ```powershell
 python -B -m unittest discover -s tests -p "test_*.py"
+```
+
+在交互式 Windows 终端中检查中文滚动残留（读取真实控制台字符与颜色格子）：
+
+```powershell
+python -B tests/windows_terminal_smoke.py
 ```
 
 主要目录：

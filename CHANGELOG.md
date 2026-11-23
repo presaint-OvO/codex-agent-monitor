@@ -2,6 +2,12 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/)。
 
+## [1.2.1] - 2026-11-23
+
+- 修复 Windows 中文列表和详情滚动时的字符残留：改用系统原生 VT 绘制、绝对光标定位和逐行清除，绕开 PDCurses 的宽字符差量刷新。
+- 保留三级导航、方向键、翻页、隐藏/恢复和退出操作；退出或异常时恢复控制台模式与原屏幕。
+- Windows 安装不再需要下载 `windows-curses`，统一使用 Python 标准库。
+
 ## [1.2.0] - 2026-11-23
 
 - 新增 Windows 原生 `install.ps1` / `uninstall.ps1`，使用隔离虚拟环境安装交互式终端依赖并提供全局 `codex-agents` 命令。

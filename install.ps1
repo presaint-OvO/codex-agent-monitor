@@ -80,11 +80,6 @@ if (-not (Test-Path $VenvPython)) {
     }
 }
 
-& $VenvPython -m pip install --disable-pip-version-check --no-input -r (Join-Path $RepoDir "requirements-windows.txt")
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to install the Windows terminal dependency."
-}
-
 $copies = @{
     (Join-Path $RepoDir "src\monitor.py") = (Join-Path $InstallDir "monitor.py")
     (Join-Path $RepoDir "src\hook.py") = (Join-Path $InstallDir "hook.py")
@@ -93,7 +88,6 @@ $copies = @{
     (Join-Path $RepoDir "README.md") = (Join-Path $InstallDir "README.md")
     (Join-Path $RepoDir "LICENSE") = (Join-Path $InstallDir "LICENSE")
     (Join-Path $RepoDir "VERSION") = (Join-Path $InstallDir "VERSION")
-    (Join-Path $RepoDir "requirements-windows.txt") = (Join-Path $InstallDir "requirements-windows.txt")
 }
 foreach ($source in $copies.Keys) {
     Copy-Item -LiteralPath $source -Destination $copies[$source] -Force

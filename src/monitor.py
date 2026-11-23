@@ -20,10 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-try:
-    import curses
-except ModuleNotFoundError:
-    curses = None  # type: ignore[assignment]
+if os.name == "nt":
+    curses = None
+else:
+    try:
+        import curses
+    except ModuleNotFoundError:
+        curses = None  # type: ignore[assignment]
 
 
 AGENT_TOOL_NAMES = {"Agent", "spawn_agent", "create_subagent"}
@@ -2741,6 +2744,163 @@ class CursesView:
             self.add(height - 1, 0, f" {footer}", self.attr("dim"), fill=True)
         return height, width
 
+    def present(self) -> None:
+        self.screen.noutrefresh()
+        curses.doupdate()
+
+    def read_key(self) -> str | None:
+        try:
+            key = self.screen.get_wch()
+        except curses.error:
+            return None
+        if isinstance(key, str):
+            return key
+        names = (
+            "KEY_LEFT", "KEY_RIGHT", "KEY_ENTER", "KEY_UP", "KEY_DOWN",
+            "KEY_PPAGE", "KEY_NPAGE", "KEY_RESIZE",
+        )
+        return next((name for name in names if key == getattr(curses, name)), None)
+
+
+class WindowsConsole:
+    """Native Windows input and VT output, with console modes restored on exit."""
+
+    def __init__(self, poll: float = 0.25) -> None:
+        self.poll = max(0.05, poll)
+        self.saved_modes: list[tuple[Any, int]] = []
+        self.last_size: tuple[int, int] | None = None
+
+    def __enter__(self) -> WindowsConsole:
+        import ctypes
+        from ctypes import wintypes
+        import msvcrt
+
+        self.keyboard = msvcrt
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        self.kernel.GetConsoleMode.restype = wintypes.BOOL
+        self.kernel.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        self.kernel.SetConsoleMode.restype = wintypes.BOOL
+        try:
+            output = msvcrt.get_osfhandle(sys.stdout.fileno())
+            input_handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+            for handle, is_output in ((output, True), (input_handle, False)):
+                mode = wintypes.DWORD()
+                if not self.kernel.GetConsoleMode(handle, ctypes.byref(mode)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                # VT + processed output, with delayed wrapping at the last cell.
+                # Native key input must not echo, wait for Enter, or use VT keys.
+                updated = (mode.value | 0x000D) if is_output else (
+                    (mode.value | 0x0080) & ~(0x0002 | 0x0004 | 0x0010 | 0x0040 | 0x0200)
+                )
+                if not self.kernel.SetConsoleMode(handle, updated):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                self.saved_modes.append((handle, mode.value))
+            sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[?7l")
+            sys.stdout.flush()
+        except BaseException:
+            self._restore_modes()
+            raise
+        return self
+
+    def _restore_modes(self) -> None:
+        for handle, mode in reversed(self.saved_modes):
+            self.kernel.SetConsoleMode(handle, mode)
+        self.saved_modes.clear()
+
+    def __exit__(self, *_exception: Any) -> None:
+        try:
+            sys.stdout.write("\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l")
+            sys.stdout.flush()
+        finally:
+            self._restore_modes()
+
+    def getmaxyx(self) -> tuple[int, int]:
+        try:
+            size = os.get_terminal_size(sys.stdout.fileno())
+        except OSError:
+            size = shutil.get_terminal_size((80, 24))
+        return max(1, size.lines), max(1, size.columns)
+
+    def read_key(self) -> str | None:
+        size = self.getmaxyx()
+        if self.last_size is not None and size != self.last_size:
+            self.last_size = size
+            return "KEY_RESIZE"
+        self.last_size = size
+        deadline = time.monotonic() + self.poll
+        while True:
+            if self.keyboard.kbhit():
+                key = self.keyboard.getwch()
+                if key in ("\x00", "\xe0"):
+                    return {
+                        "H": "KEY_UP", "P": "KEY_DOWN", "K": "KEY_LEFT",
+                        "M": "KEY_RIGHT", "I": "KEY_PPAGE", "Q": "KEY_NPAGE",
+                        "G": "g", "O": "G",
+                    }.get(self.keyboard.getwch())
+                if key == "\x03":
+                    raise KeyboardInterrupt
+                return key
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            time.sleep(min(0.01, remaining))
+
+
+class WindowsVTView:
+    """Render complete physical rows so CJK cannot corrupt a cell-diff cache."""
+
+    def __init__(self, screen: Any, *, colors: bool, stream: Any = None) -> None:
+        self.screen = screen
+        self.colors = colors
+        self.stream = sys.stdout if stream is None else stream
+        self.rows: dict[int, list[tuple[int, str, str]]] = {}
+        self.height, self.width = screen.getmaxyx()
+
+    def attr(self, name: str, *, selected: bool = False) -> str:
+        codes = {"bold": "1", "dim": "2"}
+        if self.colors:
+            codes.update({"cyan": "36", "green": "32", "yellow": "33", "red": "31"})
+        values = [codes[name]] if name in codes else []
+        if selected:
+            values.append("7")
+        return "\x1b[" + ";".join(values or ["0"]) + "m"
+
+    def add(
+        self, y: int, x: int, value: str, attr: str = "", *, fill: bool = False
+    ) -> None:
+        if y < 0 or y >= self.height or x < 0 or x >= self.width:
+            return
+        # Log content must never inject terminal movement or embedded newlines.
+        value = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in value)
+        available = max(0, self.width - x - 1)
+        text = pad_display(value, available) if fill else clip_display(value, available, "…")
+        self.rows.setdefault(y, []).append((x, text, attr or "\x1b[0m"))
+
+    def frame(self, title: str, subtitle: str, footer: str) -> tuple[int, int]:
+        self.rows.clear()
+        self.height, self.width = self.screen.getmaxyx()
+        self.add(0, 0, f" {title}", self.attr("cyan"), fill=True)
+        self.add(1, 1, subtitle, self.attr("dim"))
+        if self.height > 2:
+            self.add(self.height - 1, 0, f" {footer}", self.attr("dim"), fill=True)
+        return self.height, self.width
+
+    def present(self) -> None:
+        # Use one output write per frame, no newlines and no scrollback growth.
+        # Clear even empty rows: the previous page may have had longer content.
+        output = ["\x1b[?25l"]
+        for y in range(self.height):
+            output.append(f"\x1b[{y + 1};1H\x1b[0m\x1b[2K")
+            for x, text, attr in self.rows.get(y, []):
+                output.append(f"\x1b[{y + 1};{x + 1}H{attr}{text}\x1b[0m")
+        output.append("\x1b[H")
+        self.stream.write("".join(output))
+        self.stream.flush()
+
+    def read_key(self) -> str | None:
+        return self.screen.read_key()
+
 
 def selected_index(values: list[str], selected: str | None) -> int:
     return values.index(selected) if selected in values else 0
@@ -2754,7 +2914,7 @@ def keep_visible(index: int, offset: int, visible: int) -> int:
     return max(0, offset)
 
 
-def draw_sessions(view: CursesView, controller: TuiController, state: MonitorState) -> None:
+def draw_sessions(view: CursesView | WindowsVTView, controller: TuiController, state: MonitorState) -> None:
     sessions = controller.session_items(state)
     running = sum(
         agent.status in ACTIVE_AGENT_STATUSES
@@ -2810,7 +2970,7 @@ def draw_sessions(view: CursesView, controller: TuiController, state: MonitorSta
         )
 
 
-def draw_agents(view: CursesView, controller: TuiController, state: MonitorState) -> None:
+def draw_agents(view: CursesView | WindowsVTView, controller: TuiController, state: MonitorState) -> None:
     items = controller.agent_items(state)
     session = state.sessions.get(controller.selected_session_id or "")
     project = project_name(session.cwd) if session else "未标识会话"
@@ -2890,7 +3050,7 @@ def draw_agents(view: CursesView, controller: TuiController, state: MonitorState
         y += 2
 
 
-def draw_detail(view: CursesView, controller: TuiController, state: MonitorState) -> None:
+def draw_detail(view: CursesView | WindowsVTView, controller: TuiController, state: MonitorState) -> None:
     agent = controller.current_agent(state)
     title_name = agent.name if agent else "Agent"
     height, width = view.frame(
@@ -2915,7 +3075,7 @@ def draw_detail(view: CursesView, controller: TuiController, state: MonitorState
         view.add(1, max(1, width - display_width(progress) - 2), progress, view.attr("cyan"))
 
 
-def draw_tui(view: CursesView, controller: TuiController, state: MonitorState) -> None:
+def draw_tui(view: CursesView | WindowsVTView, controller: TuiController, state: MonitorState) -> None:
     controller.normalize(state)
     if controller.page == "sessions":
         draw_sessions(view, controller, state)
@@ -2923,8 +3083,7 @@ def draw_tui(view: CursesView, controller: TuiController, state: MonitorState) -
         draw_agents(view, controller, state)
     else:
         draw_detail(view, controller, state)
-    view.screen.noutrefresh()
-    curses.doupdate()
+    view.present()
 
 
 def run_tui(
@@ -2934,19 +3093,21 @@ def run_tui(
     hook_tail: JsonlTail,
     args: argparse.Namespace,
     visibility: VisibilityStore,
+    view: CursesView | WindowsVTView | None = None,
 ) -> int:
     try:
         locale.setlocale(locale.LC_ALL, "")
     except locale.Error:
         pass
-    try:
-        curses.curs_set(0)
-    except curses.error:
-        pass
-    screen.keypad(True)
-    screen.timeout(max(50, int(args.poll * 1000)))
+    if view is None:
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        screen.keypad(True)
+        screen.timeout(max(50, int(args.poll * 1000)))
+        view = CursesView(screen, colors=not args.no_color)
     controller = TuiController(visibility)
-    view = CursesView(screen, colors=not args.no_color)
     needs_draw = True
     last_draw = 0.0
     force_discovery = False
@@ -2956,13 +3117,10 @@ def run_tui(
             draw_tui(view, controller, state)
             last_draw = now
             needs_draw = False
-        try:
-            key = screen.get_wch()
-        except curses.error:
-            key = None
+        key = view.read_key()
         if key is not None:
             needs_draw = True
-            if key in ("q", "Q", "h", curses.KEY_LEFT, "\x1b"):
+            if key in ("q", "Q", "h", "KEY_LEFT", "\x1b"):
                 if not controller.back():
                     return 0
             elif key == "d" and controller.page in {"agents", "detail"}:
@@ -2986,21 +3144,21 @@ def run_tui(
             elif key == "u":
                 visibility.restore()
                 controller.normalize(state)
-            elif key in ("\n", "\r", curses.KEY_ENTER, "l", curses.KEY_RIGHT):
+            elif key in ("\n", "\r", "KEY_ENTER", "l", "KEY_RIGHT"):
                 controller.enter(state)
-            elif key in ("k", curses.KEY_UP):
+            elif key in ("k", "KEY_UP"):
                 if controller.page == "detail":
                     controller.detail_scroll = max(0, controller.detail_scroll - 1)
                 else:
                     controller.move(state, -1)
-            elif key in ("j", curses.KEY_DOWN):
+            elif key in ("j", "KEY_DOWN"):
                 if controller.page == "detail":
                     controller.detail_scroll += 1
                 else:
                     controller.move(state, 1)
-            elif key == curses.KEY_PPAGE:
+            elif key == "KEY_PPAGE":
                 controller.detail_scroll = max(0, controller.detail_scroll - max(1, screen.getmaxyx()[0] - 4))
-            elif key == curses.KEY_NPAGE:
+            elif key == "KEY_NPAGE":
                 controller.detail_scroll += max(1, screen.getmaxyx()[0] - 4)
             elif key == "g" and controller.page == "detail":
                 controller.detail_scroll = 0
@@ -3014,11 +3172,12 @@ def run_tui(
                     )
             elif key in ("r", "R"):
                 force_discovery = True
-            elif key == curses.KEY_RESIZE:
-                try:
-                    curses.resize_term(0, 0)
-                except curses.error:
-                    pass
+            elif key == "KEY_RESIZE":
+                if isinstance(view, CursesView):
+                    try:
+                        curses.resize_term(0, 0)
+                    except curses.error:
+                        pass
 
         hook_lines = hook_tail.poll()
         if hook_lines:
@@ -3220,10 +3379,21 @@ def main(argv: list[str] | None = None) -> int:
     hook_tail = JsonlTail(log_path)
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.plain
     if interactive:
+        if os.name == "nt":
+            try:
+                with WindowsConsole(poll=args.poll) as screen:
+                    view = WindowsVTView(screen, colors=not args.no_color)
+                    return run_tui(
+                        screen, state, scanner, hook_tail, args, visibility, view
+                    )
+            except KeyboardInterrupt:
+                return 0
+            except OSError as error:
+                print(f"无法启用 Windows 终端界面：{error}；可使用 --plain。", file=sys.stderr)
+                return 2
         if curses is None:
             print(
-                "当前 Python 缺少 curses 终端支持。Windows 请重新运行 install.ps1，"
-                "或安装 windows-curses；也可暂时使用 --plain。",
+                "当前 Python 缺少 curses 终端支持；可暂时使用 --plain。",
                 file=sys.stderr,
             )
             return 2

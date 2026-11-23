@@ -17,7 +17,7 @@ Windows 安装器测试还应使用临时 `LOCALAPPDATA`、`CODEX_HOME` 和 `-No
 
 - 新行为应附带回归测试。
 - 保留对现有 `hooks.json` 配置的兼容，不删除其他工具的 Hook。
-- Windows 下同时验证带空格的安装路径、`windows-curses` 导入、并行 Hook 写入以及安装/卸载闭环。
+- Windows 下同时验证带空格的安装路径、原生 VT 中文重绘、并行 Hook 写入以及安装/卸载闭环。
 - session rollout 解析失败时应降级而不是影响 Codex 本身。
 - Hook 必须快速返回，任何监控错误都不能中断 Agent 工作。
 - 保持 Python 3.10 兼容，避免引入非必要的第三方依赖。
