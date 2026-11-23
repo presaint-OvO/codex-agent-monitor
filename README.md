@@ -74,6 +74,15 @@ Windows 安装位置为 `%LOCALAPPDATA%\Programs\codex-agent-monitor`，状态�
 `%LOCALAPPDATA%\codex-agent-monitor`，Codex 数据默认读取 `%USERPROFILE%\.codex`。
 Windows 原生和 WSL 是两套独立的 Codex 用户目录：请在要监控的 Codex 所在系统中安装并运行本工具。
 
+如果已有终端提示找不到命令，它可能仍保留安装前的 PATH。可在当前 PowerShell 中刷新后立即运行：
+
+```powershell
+$env:Path += ";$env:LOCALAPPDATA\Programs\codex-agent-monitor\bin"
+codex-agents
+```
+
+用户 PATH 已永久保存；也可关闭全部 Windows Terminal 窗口后从开始菜单重新打开。
+
 ## 运行要求
 
 - Windows 10/11、Linux 或 WSL2

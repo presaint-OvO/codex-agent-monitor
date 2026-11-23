@@ -68,6 +68,28 @@ function Add-UserPathEntry {
     if (-not (($env:Path -split ";") | Where-Object { $_.TrimEnd("\") -ieq $Entry.TrimEnd("\") })) {
         $env:Path = "$Entry;$env:Path"
     }
+
+    # Persisting PATH does not notify Explorer or other launchers. Notify them
+    # even on reinstall, when the entry exists but their environment is stale.
+    if (-not ("CodexAgentMonitor.EnvironmentUpdate" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace CodexAgentMonitor {
+    public static class EnvironmentUpdate {
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern IntPtr SendMessageTimeout(
+            IntPtr window, uint message, UIntPtr wParam, string lParam,
+            uint flags, uint timeout, out UIntPtr result);
+    }
+}
+'@
+    }
+    $notificationResult = [UIntPtr]::Zero
+    [void][CodexAgentMonitor.EnvironmentUpdate]::SendMessageTimeout(
+        [IntPtr]0xffff, 0x001a, [UIntPtr]::Zero, "Environment",
+        0x0002, 1000, [ref]$notificationResult
+    )
 }
 
 $launcher = Resolve-PythonLauncher -Requested $Python
@@ -119,6 +141,7 @@ Write-Host "Run: codex-agents"
 if ($NoPathUpdate) {
     Write-Host "PATH was not changed. Command wrapper: $Wrapper"
 } else {
-    Write-Host "If this terminal cannot find the command yet, reopen PowerShell or Windows Terminal."
+    Write-Host "PATH is saved and Windows has been notified. Existing terminals keep their old PATH."
+    Write-Host 'For the current PowerShell: $env:Path += ";$env:LOCALAPPDATA\Programs\codex-agent-monitor\bin"'
 }
 Write-Host "Reopen Codex sessions so the user-level Hooks take effect."
